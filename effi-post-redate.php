@@ -2,7 +2,7 @@
 /**
  * Plugin Name: effi Post Redate
  * Description: Redistribue les dates de publication des articles publiés de façon progressive entre une date de début et une date de fin. Ajoute un onglet "Redater les articles" dans Outils.
- * Version: 1.0.0
+ * Version: 1.0.1
  * Author: Cédric GIRARD
  * Author URI: https://www.effi10.com
  * License: GPLv2 or later
@@ -17,6 +17,276 @@ class CG_Redater_Articles {
     public function __construct() {
         add_action('admin_menu', [$this, 'add_tools_page']);
         add_action('admin_init', [$this, 'handle_form']);
+        add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
+        add_action('wp_ajax_cg_redater_get_taxonomies', [$this, 'ajax_get_taxonomies']);
+        add_action('wp_ajax_cg_redater_get_terms', [$this, 'ajax_get_terms']);
+    }
+
+    public function enqueue_assets($hook) {
+        if ($hook !== 'tools_page_' . self::SLUG) {
+            return;
+        }
+
+        wp_register_script('cg-redater-admin', '', [], false, true);
+        wp_enqueue_script('cg-redater-admin');
+
+        $data = [
+            'ajaxUrl'      => admin_url('admin-ajax.php'),
+            'nonce'        => wp_create_nonce('cg_redater_ajax'),
+            'translations' => [
+                'noneTaxonomy'       => __('Aucune (toutes les taxonomies)', 'cg-redater'),
+                'allTerms'           => __('Tous les termes', 'cg-redater'),
+                'loadingTaxonomies'  => __('Chargement des taxonomies…', 'cg-redater'),
+                'loadingTerms'       => __('Chargement des termes…', 'cg-redater'),
+                'chooseTaxonomy'     => __('Sélectionnez une taxonomie.', 'cg-redater'),
+                'noTaxonomy'         => __('Aucune taxonomie disponible.', 'cg-redater'),
+                'noTerms'            => __('Aucun terme disponible.', 'cg-redater'),
+                'error'              => __('Une erreur est survenue, veuillez réessayer.', 'cg-redater'),
+            ],
+        ];
+
+        wp_localize_script('cg-redater-admin', 'cgRedaterAjax', $data);
+        wp_add_inline_script('cg-redater-admin', $this->get_inline_script());
+    }
+
+    private function get_inline_script() {
+        return <<<JS
+jQuery(function($){
+    var settings = window.cgRedaterAjax || {};
+    var \$postType = $('#post_type');
+    var \$taxonomy = $('#taxonomy');
+    var \$term = $('#term_id');
+
+    function resetTermsPlaceholder(message) {
+        \$term.html($('<option>', { value: '', text: message || settings.translations.chooseTaxonomy }));
+        \$term.prop('disabled', true);
+    }
+
+    function setTaxonomyLoading() {
+        \$taxonomy.html($('<option>', { value: '', text: settings.translations.loadingTaxonomies }));
+        \$taxonomy.prop('disabled', true);
+        resetTermsPlaceholder(settings.translations.chooseTaxonomy);
+    }
+
+    function handleTaxonomyError(message) {
+        \$taxonomy.html($('<option>', { value: '', text: message || settings.translations.error }));
+        \$taxonomy.prop('disabled', true);
+        resetTermsPlaceholder(settings.translations.chooseTaxonomy);
+    }
+
+    function setTermsLoading() {
+        \$term.html($('<option>', { value: '', text: settings.translations.loadingTerms }));
+        \$term.prop('disabled', true);
+    }
+
+    function handleTermsError(message) {
+        \$term.html($('<option>', { value: '', text: message || settings.translations.error }));
+        \$term.prop('disabled', true);
+    }
+
+    function fetchTaxonomies(postType, selectedTaxonomy, selectedTerm) {
+        if (!postType) {
+            handleTaxonomyError(settings.translations.noTaxonomy);
+            return;
+        }
+
+        setTaxonomyLoading();
+
+        $.ajax({
+            url: settings.ajaxUrl,
+            method: 'POST',
+            dataType: 'json',
+            data: {
+                action: 'cg_redater_get_taxonomies',
+                nonce: settings.nonce,
+                post_type: postType
+            }
+        }).done(function(response){
+            if (!response || !response.success) {
+                handleTaxonomyError(settings.translations.error);
+                return;
+            }
+
+            var list = response.data && response.data.taxonomies ? response.data.taxonomies : [];
+            if (!list.length) {
+                handleTaxonomyError(settings.translations.noTaxonomy);
+                return;
+            }
+
+            var options = '<option value="">' + settings.translations.noneTaxonomy + '</option>';
+            var hasSelected = false;
+
+            list.forEach(function(item){
+                var value = item.name || '';
+                var label = item.label || value;
+
+                if (!value) {
+                    return;
+                }
+
+                options += '<option value="' + value + '">' + label + '</option>';
+
+                if (selectedTaxonomy && value === selectedTaxonomy) {
+                    hasSelected = true;
+                }
+            });
+
+            \$taxonomy.html(options);
+            \$taxonomy.prop('disabled', false);
+
+            if (hasSelected) {
+                \$taxonomy.val(selectedTaxonomy);
+                fetchTerms(selectedTaxonomy, selectedTerm);
+            } else {
+                \$taxonomy.val('');
+                resetTermsPlaceholder(settings.translations.chooseTaxonomy);
+            }
+        }).fail(function(){
+            handleTaxonomyError(settings.translations.error);
+        });
+    }
+
+    function fetchTerms(taxonomy, selectedTerm) {
+        if (!taxonomy) {
+            resetTermsPlaceholder(settings.translations.chooseTaxonomy);
+            return;
+        }
+
+        setTermsLoading();
+
+        $.ajax({
+            url: settings.ajaxUrl,
+            method: 'POST',
+            dataType: 'json',
+            data: {
+                action: 'cg_redater_get_terms',
+                nonce: settings.nonce,
+                taxonomy: taxonomy
+            }
+        }).done(function(response){
+            if (!response || !response.success) {
+                handleTermsError(settings.translations.error);
+                return;
+            }
+
+            var list = response.data && response.data.terms ? response.data.terms : [];
+            var options = '<option value="">' + settings.translations.allTerms + '</option>';
+
+            if (!list.length) {
+                options += '<option value="" disabled>' + settings.translations.noTerms + '</option>';
+                \$term.html(options);
+                \$term.prop('disabled', false);
+                return;
+            }
+
+            list.forEach(function(item){
+                var id = item.id || '';
+                var name = item.name || '';
+                if (!id) {
+                    return;
+                }
+                options += '<option value="' + id + '">' + name + '</option>';
+            });
+
+            \$term.html(options);
+            \$term.prop('disabled', false);
+
+            if (selectedTerm) {
+                \$term.val(String(selectedTerm));
+            }
+        }).fail(function(){
+            handleTermsError(settings.translations.error);
+        });
+    }
+
+    var initialTaxonomy = \$taxonomy.data('selected') || '';
+    var initialTerm = \$term.data('selected') || '';
+    var initialPostType = \$postType.val();
+
+    fetchTaxonomies(initialPostType, initialTaxonomy, initialTerm);
+
+    \$postType.on('change', function(){
+        var postType = $(this).val();
+        \$taxonomy.data('selected', '');
+        \$term.data('selected', '');
+        fetchTaxonomies(postType, '', '');
+    });
+
+    \$taxonomy.on('change', function(){
+        var taxonomy = $(this).val();
+        fetchTerms(taxonomy, '');
+    });
+});
+JS;
+    }
+
+    public function ajax_get_taxonomies() {
+        if ( ! current_user_can(self::CAP) ) {
+            wp_send_json_error(['message' => __('Permissions insuffisantes.', 'cg-redater')], 403);
+        }
+
+        if ( ! isset($_POST['nonce']) || ! wp_verify_nonce(sanitize_text_field($_POST['nonce']), 'cg_redater_ajax') ) {
+            wp_send_json_error(['message' => __('Jeton de sécurité invalide.', 'cg-redater')], 400);
+        }
+
+        $post_type = isset($_POST['post_type']) ? sanitize_key($_POST['post_type']) : '';
+
+        if ( ! $post_type ) {
+            wp_send_json_error(['message' => __('Type de contenu manquant.', 'cg-redater')], 400);
+        }
+
+        $taxonomies = get_object_taxonomies($post_type, 'objects');
+
+        if ( empty($taxonomies) ) {
+            wp_send_json_success(['taxonomies' => []]);
+        }
+
+        $data = [];
+
+        foreach ($taxonomies as $taxonomy) {
+            $data[] = [
+                'name'  => $taxonomy->name,
+                'label' => $taxonomy->labels->singular_name . ' (' . $taxonomy->name . ')',
+            ];
+        }
+
+        wp_send_json_success(['taxonomies' => $data]);
+    }
+
+    public function ajax_get_terms() {
+        if ( ! current_user_can(self::CAP) ) {
+            wp_send_json_error(['message' => __('Permissions insuffisantes.', 'cg-redater')], 403);
+        }
+
+        if ( ! isset($_POST['nonce']) || ! wp_verify_nonce(sanitize_text_field($_POST['nonce']), 'cg_redater_ajax') ) {
+            wp_send_json_error(['message' => __('Jeton de sécurité invalide.', 'cg-redater')], 400);
+        }
+
+        $taxonomy = isset($_POST['taxonomy']) ? sanitize_key($_POST['taxonomy']) : '';
+
+        if ( ! $taxonomy ) {
+            wp_send_json_error(['message' => __('Taxonomie manquante.', 'cg-redater')], 400);
+        }
+
+        $terms = get_terms([
+            'taxonomy'   => $taxonomy,
+            'hide_empty' => false,
+        ]);
+
+        if ( is_wp_error($terms) || empty($terms) ) {
+            wp_send_json_success(['terms' => []]);
+        }
+
+        $data = [];
+
+        foreach ($terms as $term) {
+            $data[] = [
+                'id'   => $term->term_id,
+                'name' => $term->name,
+            ];
+        }
+
+        wp_send_json_success(['terms' => $data]);
     }
 
     public function add_tools_page() {
@@ -44,6 +314,8 @@ class CG_Redater_Articles {
             'date_start'    => '',
             'date_end'      => $this->get_today_site_date(),
             'post_type'     => 'post',
+            'taxonomy'      => '',
+            'term_id'       => '',
             'order_source'  => 'asc',   // comment on lit l’ordre des articles
             'exclude_sticky'=> '1',
             'limit'         => '',
@@ -100,6 +372,60 @@ class CG_Redater_Articles {
                                 <p class="description"><?php esc_html_e('Par défaut : articles (post).', 'cg-redater'); ?></p>
                             </td>
                         </tr>
+                        <?php
+                        $taxonomies = get_object_taxonomies($args['post_type'], 'objects');
+                        $selected_taxonomy = $args['taxonomy'];
+                        if ( ! array_key_exists($selected_taxonomy, $taxonomies) ) {
+                            $selected_taxonomy = '';
+                        }
+                        ?>
+                        <tr>
+                            <th scope="row"><label for="taxonomy"><?php esc_html_e('Taxonomie à filtrer', 'cg-redater'); ?></label></th>
+                            <td>
+                                <select id="taxonomy" name="taxonomy" data-selected="<?php echo esc_attr($selected_taxonomy); ?>">
+                                    <option value=""><?php esc_html_e('Aucune (toutes les taxonomies)', 'cg-redater'); ?></option>
+                                    <?php
+                                    foreach ($taxonomies as $tax) {
+                                        printf(
+                                            '<option value="%s"%s>%s</option>',
+                                            esc_attr($tax->name),
+                                            selected($selected_taxonomy, $tax->name, false),
+                                            esc_html($tax->labels->singular_name . ' (' . $tax->name . ')')
+                                        );
+                                    }
+                                    ?>
+                                </select>
+                                <p class="description"><?php esc_html_e('Optionnel. Sélectionnez une taxonomie pour restreindre le redatage à un groupe de termes.', 'cg-redater'); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="term_id"><?php esc_html_e('Terme ciblé', 'cg-redater'); ?></label></th>
+                            <td>
+                                <?php
+                                $terms_options = '<option value="">' . esc_html__('Tous les termes', 'cg-redater') . '</option>';
+                                if ( $selected_taxonomy ) {
+                                    $terms = get_terms([
+                                        'taxonomy'   => $selected_taxonomy,
+                                        'hide_empty' => false,
+                                    ]);
+                                    if ( ! is_wp_error($terms) ) {
+                                        foreach ($terms as $term) {
+                                            $terms_options .= sprintf(
+                                                '<option value="%d"%s>%s</option>',
+                                                intval($term->term_id),
+                                                selected(intval($args['term_id']), intval($term->term_id), false),
+                                                esc_html($term->name)
+                                            );
+                                        }
+                                    }
+                                }
+                                ?>
+                                <select id="term_id" name="term_id" data-selected="<?php echo esc_attr(intval($args['term_id'])); ?>" <?php disabled(empty($selected_taxonomy)); ?>>
+                                    <?php echo $terms_options; ?>
+                                </select>
+                                <p class="description"><?php esc_html_e('Optionnel. Laissez "Tous les termes" pour cibler la taxonomie entière.', 'cg-redater'); ?></p>
+                            </td>
+                        </tr>
                         <tr>
                             <th scope="row"><?php esc_html_e('Ordre de référence des articles', 'cg-redater'); ?></th>
                             <td>
@@ -148,10 +474,24 @@ class CG_Redater_Articles {
         $date_start = isset($_POST['date_start']) && $_POST['date_start'] !== '' ? sanitize_text_field($_POST['date_start']) : '';
         $date_end   = isset($_POST['date_end']) ? sanitize_text_field($_POST['date_end']) : '';
         $post_type  = isset($_POST['post_type']) ? sanitize_key($_POST['post_type']) : 'post';
+        $taxonomy   = isset($_POST['taxonomy']) ? sanitize_key($_POST['taxonomy']) : '';
+        $term_id    = isset($_POST['term_id']) ? intval($_POST['term_id']) : 0;
         $order_src  = (isset($_POST['order_source']) && in_array($_POST['order_source'], ['asc','desc'], true)) ? $_POST['order_source'] : 'asc';
         $exclude_sticky = ! empty($_POST['exclude_sticky']);
         $limit      = isset($_POST['limit']) && $_POST['limit'] !== '' ? max(1, intval($_POST['limit'])) : 0;
         $dry_run    = ! empty($_POST['dry_run']);
+
+        // Validation taxonomie et terme
+        $available_taxonomies = get_object_taxonomies($post_type, 'names');
+        if ( ! in_array($taxonomy, $available_taxonomies, true) ) {
+            $taxonomy = '';
+            $term_id = 0;
+        } elseif ( $term_id ) {
+            $term = get_term_by('id', $term_id, $taxonomy);
+            if ( ! $term || is_wp_error($term) ) {
+                $term_id = 0;
+            }
+        }
 
         // Validation dates
         $tz = wp_timezone();
@@ -177,6 +517,23 @@ class CG_Redater_Articles {
             'fields'         => 'ids',
             'no_found_rows'  => true,
         ];
+
+        if ( $taxonomy && $term_id ) {
+            $args['tax_query'] = [
+                [
+                    'taxonomy' => $taxonomy,
+                    'field'    => 'term_id',
+                    'terms'    => $term_id,
+                ],
+            ];
+        } elseif ( $taxonomy ) {
+            $args['tax_query'] = [
+                [
+                    'taxonomy' => $taxonomy,
+                    'operator' => 'EXISTS',
+                ],
+            ];
+        }
 
         if ( $exclude_sticky ) {
             $sticky = get_option('sticky_posts', []);

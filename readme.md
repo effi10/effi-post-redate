@@ -19,9 +19,6 @@ Idéal pour le lancement d’un site où plusieurs articles sont publiés en mê
 - Fonctionne sur les **articles** mais aussi sur tout autre type de contenu public.
 - **Mode test** (aperçu) pour vérifier le résultat avant application.
 
-<img width="840" height="713" alt="image" src="https://github.com/user-attachments/assets/494db5c4-2120-4b14-b9d6-e02c429f927c" />
-
-
 ## Fonctionnalités
 
 - Sélection de la **date de début** et **date de fin**  
@@ -60,6 +57,9 @@ Idéal pour le lancement d’un site où plusieurs articles sont publiés en mê
 
 ## Changelog
 
+### 1.0.1
+- Filtrage (optionnel) par taxonomie + terme de taxonomie
+
 ### 1.0.0
 - Version initiale
 - Redistribution progressive des dates entre deux bornes
@@ -70,5 +70,4 @@ Idéal pour le lancement d’un site où plusieurs articles sont publiés en mê
 
 Ce plugin est distribué sous licence GPLv2 ou ultérieure.  
 Vous êtes libre de l’utiliser, le modifier et le redistribuer, sous réserve de respecter la licence.
-
 
